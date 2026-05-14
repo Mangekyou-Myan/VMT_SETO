@@ -1,0 +1,45 @@
+fps=360
+space=raw
+yawOnlyPositionOffset=true
+hmdViewpointOffset=0/0/0/0/0/0
+timeOffset=0
+createTrackersWithoutSource=true
+disableTrackerWhenSourceLost=true
+predictionMs=5
+positionPredictionMs=25
+positionPredictionStrength=1.0
+positionPredictionMaxSpeed=8
+positionVelocitySampleMs=12
+positionVelocityBlend=0.25
+positionVelocityDeadzone=0.03
+positionOneEuro=true
+positionOneEuroMinCutoff=2.5
+positionOneEuroBeta=0.2
+positionOneEuroDerivativeCutoff=1.0
+busyWait=true
+
+# gui: small toggle window + F8 toggle
+# toggleKey: F8 only
+# holdKey: hold calibrationHoldKey
+# off: disable calibration pose
+calibration=gui
+calibrationToggleKey=F8
+calibrationHoldKey=Space
+calibrationYawRotation=true
+calibrationLockAnchor=false
+controllerUnlockCalibration=true
+controllerUnlockWithTrigger=true
+controllerUnlockWithGrip=true
+
+# Format:
+# Name_posXWhole/posXFrac/posYWhole/posYFrac/posZWhole/posZFrac_rotXWhole/rotXFrac/rotYWhole/rotYFrac/rotZWhole/rotZFrac_Serial_VmtId
+# Optional roll offset:
+# Name_pos_rot_rollWhole/rollFrac_Serial_VmtId
+# Debug display:
+# Add ＿test or _test after VmtId to print live capture-formatted pos_rot in the console.
+# Example: 0/4 is 0.4, 12/345 is 12.345.
+# Example:
+# VRC/config: X = left/right, Y = up/down, Z = forward/back
+# Blender: X = left/right, Z = up/down, Y = forward/back-ish
+# Name_position_rotation_trackerSerial_vmtId
+# Chest_0/0/0/0/0/0_0/0/0/0/0/0_LHR-XXXXXXXX_5

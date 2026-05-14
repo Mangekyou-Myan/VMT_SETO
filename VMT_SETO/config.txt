@@ -1,0 +1,4 @@
+# Default preset used on startup.
+# The GUI lists every presets/<preset-name>/config.txt file.
+# You do not need to edit this file for normal preset switching.
+preset=default
