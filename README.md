@@ -6,6 +6,11 @@ VMT SETO is a Windows tool for Virtual Motion Tracker workflows. It helps set up
 
 The tool is built for VRChat full-body calibration workflows with VMT and SteamVR/OpenVR.
 
+## Credits
+
+The software concept, direction, and testing were provided by the project owner.
+The code implementation was generated with Codex.
+
 ## Features
 
 - VMT OSC pose output
