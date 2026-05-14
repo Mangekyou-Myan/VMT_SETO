@@ -25,6 +25,10 @@ The tool is built for VRChat full-body calibration workflows with VMT and SteamV
 - Virtual Motion Tracker
 - .NET SDK 10.0 or newer for building from source
 
+## Download
+
+Booth: Coming soon
+
 ## Build
 
 ```powershell
@@ -72,3 +76,5 @@ Build artifacts in `bin/` and `obj/` are not committed to the repository. For di
 ## License
 
 MIT License.
+
+This project includes ValveSoftware OpenVR files. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
