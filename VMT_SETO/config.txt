@@ -1,4 +1,7 @@
-# Default preset used on startup.
-# The GUI lists every presets/<preset-name>/config.txt file.
-# You do not need to edit this file for normal preset switching.
-preset=default
+# Default config used on startup.
+# The GUI lists every configs/*.txt file.
+# startupConfigMode=remember starts with lastConfig.
+# startupConfigMode=fixed always starts with config.
+startupConfigMode=remember
+config=configs/default.txt
+lastConfig=configs/default.txt

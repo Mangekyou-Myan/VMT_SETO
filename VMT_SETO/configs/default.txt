@@ -36,7 +36,7 @@ controllerUnlockWithGrip=true
 # Optional roll offset:
 # Name_pos_rot_rollWhole/rollFrac_Serial_VmtId
 # Debug display:
-# Add ＿test or _test after VmtId to print live capture-formatted pos_rot in the console.
+# Add _test after VmtId to print live capture-formatted pos_rot in the console.
 # Example: 0/4 is 0.4, 12/345 is 12.345.
 # Example:
 # VRC/config: X = left/right, Y = up/down, Z = forward/back

@@ -14,5 +14,9 @@ obj/
 *.7z
 *.rar
 
+dist/
+
 VMT_SETO/presets/private/
 VMT_SETO/presets/*/private/
+VMT_SETO/configs/private/
+VMT_SETO/configs/*.local.txt

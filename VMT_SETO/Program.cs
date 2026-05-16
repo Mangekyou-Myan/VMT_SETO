@@ -44,7 +44,7 @@ namespace VmtSeto
         public bool HasLastPosition;
     }
 
-    class PresetChoice
+    class ConfigChoice
     {
         public string Name = string.Empty;
         public string ConfigPath = string.Empty;
@@ -507,10 +507,10 @@ namespace VmtSeto
 
         static string? ResolveConfigPath(string[] args)
         {
-            string? argConfigPath = TryGetArgumentValue(args, "--config");
-            if (!string.IsNullOrWhiteSpace(argConfigPath))
+            string? argConfigSelector = TryGetArgumentValue(args, "--config");
+            if (!string.IsNullOrWhiteSpace(argConfigSelector))
             {
-                return ResolvePath(AppContext.BaseDirectory, argConfigPath);
+                return ResolveConfigSelectorPath(argConfigSelector, AppContext.BaseDirectory);
             }
 
             string? argPresetName = TryGetArgumentValue(args, "--preset");
@@ -521,14 +521,34 @@ namespace VmtSeto
 
             if (args.Length == 1 && !args[0].StartsWith("-", StringComparison.Ordinal))
             {
-                return ResolvePath(AppContext.BaseDirectory, args[0]);
+                return ResolveConfigSelectorPath(args[0], AppContext.BaseDirectory);
             }
 
             string launcherConfigPath = ResolveDefaultLauncherConfigPath();
+            string launcherConfigBasePath = Path.GetDirectoryName(launcherConfigPath) ?? AppContext.BaseDirectory;
+            string? startupConfigMode = TryReadSelectorValue(launcherConfigPath, "startupConfigMode");
+            if (ShouldUseRememberedConfig(startupConfigMode))
+            {
+                string? rememberedConfig = TryReadSelectorValue(launcherConfigPath, "lastConfig");
+                if (string.IsNullOrWhiteSpace(rememberedConfig))
+                {
+                    rememberedConfig = TryReadSelectorValue(launcherConfigPath, "currentConfig");
+                }
+
+                if (!string.IsNullOrWhiteSpace(rememberedConfig))
+                {
+                    string rememberedConfigPath = ResolveConfigSelectorPath(rememberedConfig, launcherConfigBasePath);
+                    if (File.Exists(rememberedConfigPath))
+                    {
+                        return rememberedConfigPath;
+                    }
+                }
+            }
+
             string? selectedConfig = TryReadSelectorValue(launcherConfigPath, "config");
             if (!string.IsNullOrWhiteSpace(selectedConfig))
             {
-                return ResolvePath(Path.GetDirectoryName(launcherConfigPath) ?? AppContext.BaseDirectory, selectedConfig);
+                return ResolveConfigSelectorPath(selectedConfig, launcherConfigBasePath);
             }
 
             string? selectedPreset = TryReadSelectorValue(launcherConfigPath, "preset");
@@ -540,12 +560,33 @@ namespace VmtSeto
             return launcherConfigPath;
         }
 
-        static List<PresetChoice> FindPresetChoices()
+        static List<ConfigChoice> FindConfigChoices()
         {
-            var choices = new List<PresetChoice>();
+            var choices = new List<ConfigChoice>();
             var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (string presetsRoot in GetPresetRoots())
+            foreach (string configsRoot in GetConfigRoots())
+            {
+                if (!Directory.Exists(configsRoot)) continue;
+
+                foreach (string configPath in Directory.GetFiles(configsRoot, "*.txt", SearchOption.TopDirectoryOnly))
+                {
+                    string configName = Path.GetFileNameWithoutExtension(configPath);
+                    if (!seenNames.Add(configName)) continue;
+
+                    string fullPath = Path.GetFullPath(configPath);
+                    if (!seenPaths.Add(fullPath)) continue;
+
+                    choices.Add(new ConfigChoice
+                    {
+                        Name = configName,
+                        ConfigPath = fullPath
+                    });
+                }
+            }
+
+            foreach (string presetsRoot in GetLegacyPresetRoots())
             {
                 if (!Directory.Exists(presetsRoot)) continue;
 
@@ -557,7 +598,7 @@ namespace VmtSeto
                     string fullPath = Path.GetFullPath(configPath);
                     if (!seenPaths.Add(fullPath)) continue;
 
-                    choices.Add(new PresetChoice
+                    choices.Add(new ConfigChoice
                     {
                         Name = Path.GetFileName(presetDirectory),
                         ConfigPath = fullPath
@@ -780,7 +821,18 @@ namespace VmtSeto
             File.WriteAllLines(configPath, lines);
         }
 
-        static IEnumerable<string> GetPresetRoots()
+        static IEnumerable<string> GetConfigRoots()
+        {
+            yield return Path.Combine(AppContext.BaseDirectory, "configs");
+
+            string workingConfigRoot = Path.Combine(Directory.GetCurrentDirectory(), "configs");
+            if (!string.Equals(workingConfigRoot, Path.Combine(AppContext.BaseDirectory, "configs"), StringComparison.OrdinalIgnoreCase))
+            {
+                yield return workingConfigRoot;
+            }
+        }
+
+        static IEnumerable<string> GetLegacyPresetRoots()
         {
             yield return Path.Combine(AppContext.BaseDirectory, "presets");
 
@@ -805,6 +857,9 @@ namespace VmtSeto
         static string ResolvePresetPath(string presetName)
         {
             string safePresetName = presetName.Trim().Trim('\\', '/');
+            string configPath = ResolveConfigFilePath(safePresetName);
+            if (File.Exists(configPath)) return configPath;
+
             string outputPresetPath = Path.Combine(AppContext.BaseDirectory, "presets", safePresetName, "config.txt");
             if (File.Exists(outputPresetPath)) return outputPresetPath;
 
@@ -812,6 +867,47 @@ namespace VmtSeto
             if (File.Exists(workingPresetPath)) return workingPresetPath;
 
             return outputPresetPath;
+        }
+
+        static string ResolveConfigSelectorPath(string selector, string basePath)
+        {
+            string directPath = ResolvePath(basePath, selector);
+            if (File.Exists(directPath)) return directPath;
+
+            string workingPath = ResolvePath(Directory.GetCurrentDirectory(), selector);
+            if (File.Exists(workingPath)) return workingPath;
+
+            string configPath = ResolveConfigFilePath(selector);
+            if (File.Exists(configPath)) return configPath;
+
+            return directPath;
+        }
+
+        static string ResolveConfigFilePath(string configName)
+        {
+            string safeConfigName = configName.Trim().Trim('"', '\\', '/');
+            if (string.IsNullOrWhiteSpace(safeConfigName))
+            {
+                safeConfigName = "default";
+            }
+
+            if (safeConfigName.Contains('\\', StringComparison.Ordinal)
+                || safeConfigName.Contains('/', StringComparison.Ordinal))
+            {
+                safeConfigName = Path.GetFileName(safeConfigName);
+            }
+
+            string fileName = Path.HasExtension(safeConfigName)
+                ? safeConfigName
+                : safeConfigName + ".txt";
+
+            foreach (string configsRoot in GetConfigRoots())
+            {
+                string configPath = Path.Combine(configsRoot, fileName);
+                if (File.Exists(configPath)) return configPath;
+            }
+
+            return Path.Combine(AppContext.BaseDirectory, "configs", fileName);
         }
 
         static string ResolvePath(string basePath, string path)
@@ -859,6 +955,85 @@ namespace VmtSeto
             }
 
             return null;
+        }
+
+        static bool ShouldUseRememberedConfig(string? mode)
+        {
+            if (string.IsNullOrWhiteSpace(mode)) return true;
+
+            return mode.Trim().ToLowerInvariant() switch
+            {
+                "remember" or "last" or "inherit" or "current" or "previous" => true,
+                "true" or "yes" or "on" or "1" => true,
+                _ => false
+            };
+        }
+
+        static void RememberSelectedConfig(string selectedConfigPath)
+        {
+            string launcherConfigPath = ResolveDefaultLauncherConfigPath();
+
+            foreach (string path in GetLauncherConfigSavePaths(launcherConfigPath))
+            {
+                string relativeConfigPath = CreateConfigReferenceForLauncher(path, selectedConfigPath);
+                WriteSelectorValue(path, "lastConfig", relativeConfigPath);
+            }
+        }
+
+        static IEnumerable<string> GetLauncherConfigSavePaths(string launcherConfigPath)
+        {
+            string fullPath = Path.GetFullPath(launcherConfigPath);
+            yield return fullPath;
+
+            string? sourcePath = ResolveSourceConfigPathFromOutput(fullPath);
+            if (!string.IsNullOrWhiteSpace(sourcePath)
+                && !string.Equals(Path.GetFullPath(sourcePath), fullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return sourcePath;
+            }
+        }
+
+        static string CreateConfigReferenceForLauncher(string launcherConfigPath, string selectedConfigPath)
+        {
+            string launcherPath = Path.GetFullPath(launcherConfigPath);
+            string configPath = Path.GetFullPath(selectedConfigPath);
+
+            if (ResolveSourceConfigPathFromOutput(launcherPath) is null
+                && ResolveSourceConfigPathFromOutput(configPath) is string sourceConfigPath)
+            {
+                configPath = sourceConfigPath;
+            }
+
+            string launcherDirectory = Path.GetDirectoryName(launcherPath) ?? AppContext.BaseDirectory;
+            return Path.GetRelativePath(launcherDirectory, configPath)
+                .Replace(Path.DirectorySeparatorChar, '/');
+        }
+
+        static void WriteSelectorValue(string configPath, string key, string value)
+        {
+            var lines = File.Exists(configPath)
+                ? File.ReadAllLines(configPath).ToList()
+                : new List<string>();
+
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string line = StripComment(lines[i]).Trim();
+                int settingSeparator = line.IndexOf('=');
+                if (settingSeparator <= 0) continue;
+
+                string settingKey = line[..settingSeparator].Trim();
+                if (settingKey.Equals(key, StringComparison.OrdinalIgnoreCase))
+                {
+                    lines[i] = $"{key}={value}";
+                    Directory.CreateDirectory(Path.GetDirectoryName(configPath) ?? AppContext.BaseDirectory);
+                    File.WriteAllLines(configPath, lines);
+                    return;
+                }
+            }
+
+            lines.Add($"{key}={value}");
+            Directory.CreateDirectory(Path.GetDirectoryName(configPath) ?? AppContext.BaseDirectory);
+            File.WriteAllLines(configPath, lines);
         }
 
         static string StripComment(string line)
@@ -1061,7 +1236,7 @@ namespace VmtSeto
         static bool StripDebugSuffix(ref string line)
         {
             string trimmed = line.Trim();
-            string[] suffixes = { "＿test", "_test", "＿debug", "_debug" };
+            string[] suffixes = { "_test", "_debug" };
 
             foreach (string suffix in suffixes)
             {
@@ -1229,7 +1404,7 @@ namespace VmtSeto
                     config.SerialNumber,
                     config.VmtId.ToString(CultureInfo.InvariantCulture));
 
-                return config.DebugOutput ? line + "＿test" : line;
+                return config.DebugOutput ? line + "_test" : line;
             }
 
             line = string.Join("_",
@@ -1239,7 +1414,7 @@ namespace VmtSeto
                 config.SerialNumber,
                 config.VmtId.ToString(CultureInfo.InvariantCulture));
 
-            return config.DebugOutput ? line + "＿test" : line;
+            return config.DebugOutput ? line + "_test" : line;
         }
 
         static string FormatSlashVector(Vector3 value)
@@ -1283,7 +1458,7 @@ namespace VmtSeto
                 var form = new CalibrationForm(
                     () => calibrationActive,
                     SetCalibrationActive,
-                    FindPresetChoices,
+                    FindConfigChoices,
                     () => settings.SelectedConfigPath,
                     GetBodyConfigs,
                     CaptureCurrentPoses,
@@ -1342,7 +1517,7 @@ namespace VmtSeto
         {
             if (!File.Exists(configPath))
             {
-                Console.WriteLine($"Preset switch failed: config.txt not found. ({configPath})");
+                Console.WriteLine($"Config switch failed: config file not found. ({configPath})");
                 return false;
             }
 
@@ -1356,9 +1531,10 @@ namespace VmtSeto
                 return false;
             }
 
+            RememberSelectedConfig(settings.SelectedConfigPath);
             Sender.Connect(settings.TargetHost, settings.TargetPort);
             SendCreateAllAtOrigin(force: true);
-            Console.WriteLine($"Switched preset: {settings.SelectedConfigPath}");
+            Console.WriteLine($"Switched config: {settings.SelectedConfigPath}");
             return true;
         }
 
@@ -2187,7 +2363,7 @@ namespace VmtSeto
     {
         readonly Func<bool> getCalibrationActive;
         readonly Action<bool> setCalibrationActive;
-        readonly Func<List<PresetChoice>> getPresetChoices;
+        readonly Func<List<ConfigChoice>> getConfigChoices;
         readonly Func<string> getCurrentConfigPath;
         readonly Func<List<BodyPartConfig>> getBodyConfigs;
         readonly Func<IReadOnlyList<BodyPartConfig>, string> captureCurrentPoses;
@@ -2199,7 +2375,7 @@ namespace VmtSeto
         readonly Action<float> setPositionPredictionStrength;
         readonly Action<string> requestConfigReload;
         readonly Action requestExit;
-        readonly ComboBox presetComboBox;
+        readonly ComboBox configComboBox;
         readonly ComboBox bodyConfigComboBox;
         readonly CheckedListBox batchTrackerListBox;
         readonly TextBox selectedPathTextBox;
@@ -2213,8 +2389,8 @@ namespace VmtSeto
         readonly NumericUpDown rollOffsetInput;
         readonly TrackBar positionPredictionTrackBar;
         readonly Label positionPredictionValueLabel;
-        readonly Button applyPresetButton;
-        readonly Button refreshPresetButton;
+        readonly Button applyConfigButton;
+        readonly Button refreshConfigButton;
         readonly Button capturePoseButton;
         readonly Button armTriggerButton;
         readonly Button applyCheckedButton;
@@ -2233,7 +2409,7 @@ namespace VmtSeto
         public CalibrationForm(
             Func<bool> getCalibrationActive,
             Action<bool> setCalibrationActive,
-            Func<List<PresetChoice>> getPresetChoices,
+            Func<List<ConfigChoice>> getConfigChoices,
             Func<string> getCurrentConfigPath,
             Func<List<BodyPartConfig>> getBodyConfigs,
             Func<IReadOnlyList<BodyPartConfig>, string> captureCurrentPoses,
@@ -2248,7 +2424,7 @@ namespace VmtSeto
         {
             this.getCalibrationActive = getCalibrationActive;
             this.setCalibrationActive = setCalibrationActive;
-            this.getPresetChoices = getPresetChoices;
+            this.getConfigChoices = getConfigChoices;
             this.getCurrentConfigPath = getCurrentConfigPath;
             this.getBodyConfigs = getBodyConfigs;
             this.captureCurrentPoses = captureCurrentPoses;
@@ -2269,16 +2445,16 @@ namespace VmtSeto
             TopMost = true;
             StartPosition = FormStartPosition.CenterScreen;
 
-            var presetLabel = new Label
+            var configLabel = new Label
             {
                 Left = 16,
                 Top = 16,
                 Width = 560,
                 Height = 20,
-                Text = "Preset"
+                Text = "Config"
             };
 
-            presetComboBox = new ComboBox
+            configComboBox = new ComboBox
             {
                 Left = 16,
                 Top = 40,
@@ -2286,9 +2462,9 @@ namespace VmtSeto
                 Height = 24,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
-            presetComboBox.SelectedIndexChanged += (_, _) => RefreshSelectedPath();
+            configComboBox.SelectedIndexChanged += (_, _) => RefreshSelectedPath();
 
-            refreshPresetButton = new Button
+            refreshConfigButton = new Button
             {
                 Left = 420,
                 Top = 38,
@@ -2296,9 +2472,9 @@ namespace VmtSeto
                 Height = 28,
                 Text = "Refresh"
             };
-            refreshPresetButton.Click += (_, _) => LoadPresetChoices();
+            refreshConfigButton.Click += (_, _) => LoadConfigChoices();
 
-            applyPresetButton = new Button
+            applyConfigButton = new Button
             {
                 Left = 508,
                 Top = 38,
@@ -2306,7 +2482,7 @@ namespace VmtSeto
                 Height = 28,
                 Text = "Apply"
             };
-            applyPresetButton.Click += (_, _) => ApplySelectedPreset();
+            applyConfigButton.Click += (_, _) => ApplySelectedConfig();
 
             selectedPathTextBox = new TextBox
             {
@@ -2550,10 +2726,10 @@ namespace VmtSeto
             };
             toggleButton.Click += (_, _) => ToggleCalibration();
 
-            Controls.Add(presetLabel);
-            Controls.Add(presetComboBox);
-            Controls.Add(refreshPresetButton);
-            Controls.Add(applyPresetButton);
+            Controls.Add(configLabel);
+            Controls.Add(configComboBox);
+            Controls.Add(refreshConfigButton);
+            Controls.Add(applyConfigButton);
             Controls.Add(selectedPathTextBox);
             Controls.Add(currentLabel);
             Controls.Add(currentPathTextBox);
@@ -2600,7 +2776,7 @@ namespace VmtSeto
                 requestExit();
             };
 
-            LoadPresetChoices();
+            LoadConfigChoices();
             LoadBodyChoices();
             RefreshState();
         }
@@ -2620,40 +2796,40 @@ namespace VmtSeto
             };
         }
 
-        void LoadPresetChoices()
+        void LoadConfigChoices()
         {
             string currentPath = getCurrentConfigPath();
-            var choices = getPresetChoices();
+            var choices = getConfigChoices();
 
-            presetComboBox.Items.Clear();
-            presetComboBox.Items.AddRange(choices.Cast<object>().ToArray());
+            configComboBox.Items.Clear();
+            configComboBox.Items.AddRange(choices.Cast<object>().ToArray());
 
             if (choices.Count == 0)
             {
                 selectedPathTextBox.Text = string.Empty;
-                applyPresetButton.Enabled = false;
+                applyConfigButton.Enabled = false;
                 return;
             }
 
             int selectedIndex = choices.FindIndex(choice =>
                 string.Equals(Path.GetFullPath(choice.ConfigPath), Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase));
 
-            presetComboBox.SelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
-            applyPresetButton.Enabled = true;
+            configComboBox.SelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+            applyConfigButton.Enabled = true;
             RefreshSelectedPath();
         }
 
         void RefreshSelectedPath()
         {
-            if (presetComboBox.SelectedItem is PresetChoice choice)
+            if (configComboBox.SelectedItem is ConfigChoice choice)
             {
                 selectedPathTextBox.Text = choice.ConfigPath;
             }
         }
 
-        void ApplySelectedPreset()
+        void ApplySelectedConfig()
         {
-            if (presetComboBox.SelectedItem is not PresetChoice choice)
+            if (configComboBox.SelectedItem is not ConfigChoice choice)
             {
                 return;
             }

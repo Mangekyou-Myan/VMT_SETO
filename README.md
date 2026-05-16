@@ -14,7 +14,7 @@ The code implementation was generated with Codex.
 ## Features
 
 - VMT OSC pose output
-- GUI preset switching while running
+- GUI config switching while running
 - Calibration lock/unlock from the GUI
 - Controller trigger/grip unlock during calibration
 - Capture current tracker pose from the GUI or controller trigger
@@ -33,6 +33,10 @@ The code implementation was generated with Codex.
 ## Download
 
 Booth: Coming soon
+
+## Manual
+
+User manual: [Google Docs](https://docs.google.com/document/d/1EgEW8kCiLtBClyak2-tKwxFNZu0EyZutmvdmoZD_ci4/edit?tab=t.0)
 
 ## Build
 
@@ -66,13 +70,29 @@ The startup selector is:
 VMT_SETO\config.txt
 ```
 
-The default preset is:
+By default, VMT SETO starts with the config selected last time:
 
 ```text
-VMT_SETO\presets\default\config.txt
+startupConfigMode=remember
+lastConfig=configs/default.txt
 ```
 
-The default preset intentionally contains no real tracker serial numbers. Copy it or create another preset folder for personal use.
+When a config is applied from the GUI, `lastConfig` is updated automatically.
+
+To always start with the same config, set:
+
+```text
+startupConfigMode=fixed
+config=configs/default.txt
+```
+
+The default config is:
+
+```text
+VMT_SETO\configs\default.txt
+```
+
+The default config intentionally contains no real tracker serial numbers. Copy it or create another `.txt` file in `VMT_SETO\configs\` for personal use.
 
 ## Release Builds
 
