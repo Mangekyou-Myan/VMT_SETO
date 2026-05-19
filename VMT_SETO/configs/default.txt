@@ -32,14 +32,15 @@ controllerUnlockWithTrigger=true
 controllerUnlockWithGrip=true
 
 # Format:
-# Name_posXWhole/posXFrac/posYWhole/posYFrac/posZWhole/posZFrac_rotXWhole/rotXFrac/rotYWhole/rotYFrac/rotZWhole/rotZFrac_Serial_VmtId
+# Name_+_posXWhole/posXFrac/posYWhole/posYFrac/posZWhole/posZFrac_+_rotXWhole/rotXFrac/rotYWhole/rotYFrac/rotZWhole/rotZFrac_+_Serial_+_VmtId
 # Optional roll offset:
-# Name_pos_rot_rollWhole/rollFrac_Serial_VmtId
+# Name_+_pos_+_rot_+_rollWhole/rollFrac_+_Serial_+_VmtId
 # Debug display:
 # Add _test after VmtId to print live capture-formatted pos_rot in the console.
 # Example: 0/4 is 0.4, 12/345 is 12.345.
+# Tracker lines must use the '_+_' separator.
 # Example:
 # VRC/config: X = left/right, Y = up/down, Z = forward/back
 # Blender: X = left/right, Z = up/down, Y = forward/back-ish
-# Name_position_rotation_trackerSerial_vmtId
-# Chest_0/0/0/0/0/0_0/0/0/0/0/0_LHR-XXXXXXXX_5
+# Name_+_position_+_rotation_+_trackerSerial_+_vmtId
+# Chest_+_0/0/0/0/0/0_+_0/0/0/0/0/0_+_LHR-XXXXXXXX_+_5

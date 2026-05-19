@@ -94,6 +94,20 @@ VMT_SETO\configs\default.txt
 
 The default config intentionally contains no real tracker serial numbers. Copy it or create another `.txt` file in `VMT_SETO\configs\` for personal use.
 
+Tracker lines use `_+_` as the field separator:
+
+```text
+Chest_+_0/0/0/0/0/0_+_0/0/0/0/0/0_+_LHR-XXXXXXXX_+_5
+```
+
+Tracker lines must use `_+_` so tracker names or serials can contain `_`.
+
+## Troubleshooting
+
+If VMT SETO exits unexpectedly, check `crash.log` next to `VMT_SETO.exe`.
+
+If SteamVR is not ready, VMT SETO stays open and retries automatically. If OSC sending fails, VMT SETO logs the error and retries instead of exiting immediately.
+
 ## Release Builds
 
 Build artifacts in `bin/` and `obj/` are not committed to the repository. For distribution, package the built files from `VMT_SETO\bin\Debug\net10.0-windows\` as a zip and attach it to a GitHub Release.

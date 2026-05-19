@@ -196,13 +196,17 @@ namespace VmtSeto
     class Program
     {
         const int EscapeKey = 0x1B;
+        const int SteamVrRetryDelayMs = 3000;
+        const int OscRetryDelayMs = 3000;
         const string TypeTag = ",iiffffffff";
+        const string ConfigFieldSeparator = "_+_";
 
         static readonly List<BodyPartConfig> Configs = new();
         static readonly System.Net.Sockets.UdpClient Sender = new();
         static readonly byte[] OscBuffer = new byte[256];
         static readonly object PoseStateLock = new();
         static readonly object TriggerCaptureLock = new();
+        static readonly object CrashLogLock = new();
 
         static AppSettings settings = new();
         static string oscAddress = "/VMT/Raw/Unity";
@@ -229,14 +233,23 @@ namespace VmtSeto
         static string? pendingConfigReloadPath;
         static Thread? controlUiThread;
         static CalibrationForm? calibrationForm;
+        static bool exceptionLoggingInstalled;
+        static bool oscSendFailed;
+        static string lastOscFailureMessage = string.Empty;
+        static long nextOscRetryTick;
 
         [STAThread]
         static void Main(string[] args)
         {
+            InstallExceptionLogging();
             bool timerPeriodSet = NativeMethods.TimeBeginPeriod(1) == 0;
             try
             {
                 MainCore(args);
+            }
+            catch (Exception ex)
+            {
+                ReportFatalException("Fatal exception", ex);
             }
             finally
             {
@@ -245,6 +258,91 @@ namespace VmtSeto
                     NativeMethods.TimeEndPeriod(1);
                 }
             }
+        }
+
+        static void InstallExceptionLogging()
+        {
+            if (exceptionLoggingInstalled) return;
+
+            exceptionLoggingInstalled = true;
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (_, e) => ReportFatalException("UI thread exception", e.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            {
+                if (e.ExceptionObject is Exception ex)
+                {
+                    ReportFatalException("Unhandled exception", ex);
+                }
+                else
+                {
+                    ReportCrashLogMessage("Unhandled exception", e.ExceptionObject?.ToString() ?? "Unknown exception object.");
+                }
+            };
+        }
+
+        static void ReportFatalException(string context, Exception ex)
+        {
+            Console.WriteLine($"{context}: {ex.GetType().Name}: {ex.Message}");
+            if (TryWriteCrashLog(context, ex.ToString(), out string logPath))
+            {
+                Console.WriteLine($"Crash log: {logPath}");
+            }
+        }
+
+        static void ReportCrashLogMessage(string context, string message)
+        {
+            Console.WriteLine($"{context}: {message}");
+            if (TryWriteCrashLog(context, message, out string logPath))
+            {
+                Console.WriteLine($"Crash log: {logPath}");
+            }
+        }
+
+        static bool TryWriteCrashLog(string context, string details, out string logPath)
+        {
+            string text = BuildCrashLogEntry(context, details);
+            logPath = Path.Combine(AppContext.BaseDirectory, "crash.log");
+
+            lock (CrashLogLock)
+            {
+                try
+                {
+                    File.AppendAllText(logPath, text, Encoding.UTF8);
+                    return true;
+                }
+                catch
+                {
+                    try
+                    {
+                        logPath = Path.Combine(Path.GetTempPath(), "VMT_SETO_crash.log");
+                        File.AppendAllText(logPath, text, Encoding.UTF8);
+                        return true;
+                    }
+                    catch
+                    {
+                        logPath = string.Empty;
+                        return false;
+                    }
+                }
+            }
+        }
+
+        static string BuildCrashLogEntry(string context, string details)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("===== VMT SETO crash log =====");
+            builder.AppendLine($"Time: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}");
+            builder.AppendLine($"Context: {context}");
+            builder.AppendLine($"BaseDirectory: {AppContext.BaseDirectory}");
+            builder.AppendLine($"CurrentDirectory: {Directory.GetCurrentDirectory()}");
+            if (!string.IsNullOrWhiteSpace(settings.SelectedConfigPath))
+            {
+                builder.AppendLine($"SelectedConfig: {settings.SelectedConfigPath}");
+            }
+
+            builder.AppendLine(details);
+            builder.AppendLine();
+            return builder.ToString();
         }
 
         static void MainCore(string[] args)
@@ -266,14 +364,12 @@ namespace VmtSeto
             ApplyRuntimeHints();
             StartControlUi();
 
-            Sender.Connect(settings.TargetHost, settings.TargetPort);
+            ConnectOsc("startup");
             SendCreateAllAtOrigin(force: true);
 
-            var error = EVRInitError.None;
-            var vrSystem = OpenVR.Init(ref error, EVRApplicationType.VRApplication_Background);
-            if (error != EVRInitError.None)
+            CVRSystem? vrSystem = WaitForSteamVr();
+            if (vrSystem == null)
             {
-                Console.WriteLine($"SteamVR init failed: {error}");
                 ShutdownControlUi();
                 Sender.Dispose();
                 return;
@@ -291,6 +387,66 @@ namespace VmtSeto
                 Sender.Dispose();
                 OpenVR.Shutdown();
             }
+        }
+
+        static CVRSystem? WaitForSteamVr()
+        {
+            Console.WriteLine("Waiting for SteamVR/OpenVR. (Esc: exit)");
+
+            while (!exitRequested && !NativeMethods.IsKeyDown(EscapeKey))
+            {
+                if (TryConsumePendingConfigReload(out string reloadConfigPath))
+                {
+                    ApplyConfigReload(reloadConfigPath);
+                }
+
+                try
+                {
+                    var error = EVRInitError.None;
+                    CVRSystem vrSystem = OpenVR.Init(ref error, EVRApplicationType.VRApplication_Background);
+                    if (error == EVRInitError.None)
+                    {
+                        Console.WriteLine("SteamVR connected.");
+                        return vrSystem;
+                    }
+
+                    Console.WriteLine($"SteamVR is not ready: {error}. Retrying in {SteamVrRetryDelayMs / 1000} seconds.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"SteamVR init exception: {ex.GetType().Name}: {ex.Message}");
+                    Console.WriteLine($"Retrying in {SteamVrRetryDelayMs / 1000} seconds. (Esc: exit)");
+                }
+
+                if (!WaitForSteamVrRetryDelay())
+                {
+                    break;
+                }
+            }
+
+            return null;
+        }
+
+        static bool WaitForSteamVrRetryDelay()
+        {
+            int waitedMs = 0;
+            while (waitedMs < SteamVrRetryDelayMs)
+            {
+                if (exitRequested || NativeMethods.IsKeyDown(EscapeKey))
+                {
+                    return false;
+                }
+
+                if (TryConsumePendingConfigReload(out string reloadConfigPath))
+                {
+                    ApplyConfigReload(reloadConfigPath);
+                }
+
+                Thread.Sleep(100);
+                waitedMs += 100;
+            }
+
+            return true;
         }
 
         static void RunLoop(CVRSystem vrSystem)
@@ -484,19 +640,35 @@ namespace VmtSeto
             settings = new AppSettings { SelectedConfigPath = configPath };
             Configs.Clear();
 
-            foreach (var rawLine in File.ReadAllLines(configPath))
+            string[] configLines = File.ReadAllLines(configPath);
+            for (int i = 0; i < configLines.Length; i++)
             {
+                string rawLine = configLines[i];
+                int lineNumber = i + 1;
                 string line = StripComment(rawLine).Trim();
                 if (line.Length == 0) continue;
 
                 int settingSeparator = line.IndexOf('=');
                 if (settingSeparator > 0)
                 {
-                    ParseSetting(line[..settingSeparator].Trim(), line[(settingSeparator + 1)..].Trim());
+                    try
+                    {
+                        ParseSetting(
+                            line[..settingSeparator].Trim(),
+                            line[(settingSeparator + 1)..].Trim(),
+                            configPath,
+                            lineNumber,
+                            line);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogConfigError(configPath, lineNumber, $"Failed to parse setting: {ex.Message}", line);
+                    }
+
                     continue;
                 }
 
-                ParseBodyPartConfig(line);
+                ParseBodyPartConfig(line, configPath, lineNumber);
             }
 
             settings.SelectedConfigPath = configPath;
@@ -1042,7 +1214,19 @@ namespace VmtSeto
             return commentIndex >= 0 ? line[..commentIndex] : line;
         }
 
-        static void ParseSetting(string key, string value)
+        static void LogConfigError(string configPath, int lineNumber, string message, string line)
+        {
+            Console.WriteLine($"Config error: {configPath}:{lineNumber}: {message}");
+            Console.WriteLine($"  {line}");
+        }
+
+        static void LogConfigWarning(string configPath, int lineNumber, string message, string line)
+        {
+            Console.WriteLine($"Config warning: {configPath}:{lineNumber}: {message}");
+            Console.WriteLine($"  {line}");
+        }
+
+        static void ParseSetting(string key, string value, string configPath, int lineNumber, string line)
         {
             switch (key.Trim().ToLowerInvariant())
             {
@@ -1208,16 +1392,20 @@ namespace VmtSeto
                     break;
 
                 default:
-                    Console.WriteLine($"Unknown setting: {key}");
+                    LogConfigWarning(configPath, lineNumber, $"Unknown setting: {key}", line);
                     break;
             }
         }
 
-        static void ParseBodyPartConfig(string line)
+        static void ParseBodyPartConfig(string line, string configPath, int lineNumber)
         {
             bool debugOutput = StripDebugSuffix(ref line);
-            var parts = line.Split('_');
-            if (parts.Length < 4) return;
+            var parts = SplitConfigFields(line);
+            if (parts.Length < 4)
+            {
+                LogConfigError(configPath, lineNumber, "Tracker line must have at least 4 sections separated by '_+_'.", line);
+                return;
+            }
 
             try
             {
@@ -1226,10 +1414,14 @@ namespace VmtSeto
                     config.DebugOutput = debugOutput;
                     Configs.Add(config);
                 }
+                else
+                {
+                    LogConfigError(configPath, lineNumber, "Failed to parse tracker line.", line);
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                Console.WriteLine($"Failed to parse config line: {line}");
+                LogConfigError(configPath, lineNumber, $"Failed to parse tracker line: {ex.Message}", line);
             }
         }
 
@@ -1299,7 +1491,6 @@ namespace VmtSeto
             int separatorIndex = FindVectorSeparator(parts[1]);
             if (separatorIndex <= 0 || separatorIndex >= parts[1].Length - 1)
             {
-                Console.WriteLine($"Failed to parse config line: {line}");
                 return false;
             }
 
@@ -1312,6 +1503,11 @@ namespace VmtSeto
                 VmtId = int.Parse(parts[3], CultureInfo.InvariantCulture)
             };
             return true;
+        }
+
+        static string[] SplitConfigFields(string line)
+        {
+            return line.Split(ConfigFieldSeparator, StringSplitOptions.None);
         }
 
         static int FindVectorSeparator(string value)
@@ -1396,7 +1592,7 @@ namespace VmtSeto
             string line;
             if (MathF.Abs(config.RollOffset) > 0.00001f)
             {
-                line = string.Join("_",
+                line = string.Join(ConfigFieldSeparator,
                     config.Name,
                     FormatSlashVector(config.PositionOffset),
                     FormatSlashVector(config.RotationOffset),
@@ -1407,7 +1603,7 @@ namespace VmtSeto
                 return config.DebugOutput ? line + "_test" : line;
             }
 
-            line = string.Join("_",
+            line = string.Join(ConfigFieldSeparator,
                 config.Name,
                 FormatSlashVector(config.PositionOffset),
                 FormatSlashVector(config.RotationOffset),
@@ -1532,7 +1728,7 @@ namespace VmtSeto
             }
 
             RememberSelectedConfig(settings.SelectedConfigPath);
-            Sender.Connect(settings.TargetHost, settings.TargetPort);
+            ConnectOsc("config switch");
             SendCreateAllAtOrigin(force: true);
             Console.WriteLine($"Switched config: {settings.SelectedConfigPath}");
             return true;
@@ -2142,6 +2338,57 @@ namespace VmtSeto
             return OpenVR.k_unTrackedDeviceIndexInvalid;
         }
 
+        static bool ConnectOsc(string context)
+        {
+            try
+            {
+                Sender.Connect(settings.TargetHost, settings.TargetPort);
+                if (oscSendFailed)
+                {
+                    Console.WriteLine($"OSC connected: {settings.TargetHost}:{settings.TargetPort}");
+                }
+
+                oscSendFailed = false;
+                lastOscFailureMessage = string.Empty;
+                nextOscRetryTick = 0;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                HandleOscFailure(context, ex);
+                return false;
+            }
+        }
+
+        static bool EnsureOscReady()
+        {
+            if (!oscSendFailed)
+            {
+                return true;
+            }
+
+            if (Stopwatch.GetTimestamp() < nextOscRetryTick)
+            {
+                return false;
+            }
+
+            return ConnectOsc("retry");
+        }
+
+        static void HandleOscFailure(string context, Exception ex)
+        {
+            string message = $"{ex.GetType().Name}: {ex.Message}";
+            if (!oscSendFailed || !string.Equals(message, lastOscFailureMessage, StringComparison.Ordinal))
+            {
+                Console.WriteLine($"OSC {context} failed: {message}");
+                Console.WriteLine($"OSC will retry in {OscRetryDelayMs / 1000} seconds. Target: {settings.TargetHost}:{settings.TargetPort}");
+                lastOscFailureMessage = message;
+            }
+
+            oscSendFailed = true;
+            nextOscRetryTick = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (OscRetryDelayMs / 1000.0));
+        }
+
         static void SendDisableAll(bool force)
         {
             foreach (var conf in Configs)
@@ -2170,6 +2417,7 @@ namespace VmtSeto
         static void SendPose(BodyPartConfig conf, bool enable, Vector3 position, Quaternion rotation, bool force = false)
         {
             if (!force && !enable && !conf.LastEnableSent) return;
+            if (!EnsureOscReady()) return;
 
             int length = BuildVmtPoseMessage(
                 oscAddress,
@@ -2180,8 +2428,15 @@ namespace VmtSeto
                 rotation,
                 OscBuffer);
 
-            Sender.Send(OscBuffer, length);
-            conf.LastEnableSent = enable;
+            try
+            {
+                Sender.Send(OscBuffer, length);
+                conf.LastEnableSent = enable;
+            }
+            catch (Exception ex)
+            {
+                HandleOscFailure("send", ex);
+            }
         }
 
         static int BuildVmtPoseMessage(string address, int index, int enable, float timeOffset, Vector3 position, Quaternion rotation, byte[] buffer)
