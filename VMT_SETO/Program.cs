@@ -402,15 +402,14 @@ namespace VmtSeto
 
                 try
                 {
-                    var error = EVRInitError.None;
-                    CVRSystem vrSystem = OpenVR.Init(ref error, EVRApplicationType.VRApplication_Background);
-                    if (error == EVRInitError.None)
+                    CVRSystem? vrSystem = TryInitSteamVrWithFallback(out string initStatus);
+                    if (vrSystem != null)
                     {
-                        Console.WriteLine("SteamVR connected.");
+                        Console.WriteLine(initStatus);
                         return vrSystem;
                     }
 
-                    Console.WriteLine($"SteamVR is not ready: {error}. Retrying in {SteamVrRetryDelayMs / 1000} seconds.");
+                    Console.WriteLine($"{initStatus}. Retrying in {SteamVrRetryDelayMs / 1000} seconds.");
                 }
                 catch (Exception ex)
                 {
@@ -424,6 +423,34 @@ namespace VmtSeto
                 }
             }
 
+            return null;
+        }
+
+        static CVRSystem? TryInitSteamVrWithFallback(out string status)
+        {
+            var backgroundError = EVRInitError.None;
+            CVRSystem? vrSystem = OpenVR.Init(ref backgroundError, EVRApplicationType.VRApplication_Background);
+            if (backgroundError == EVRInitError.None && vrSystem != null)
+            {
+                status = "SteamVR connected. AppType: Background.";
+                return vrSystem;
+            }
+
+            if (backgroundError != EVRInitError.Init_NoServerForBackgroundApp)
+            {
+                status = $"SteamVR is not ready: {backgroundError}";
+                return null;
+            }
+
+            var utilityError = EVRInitError.None;
+            vrSystem = OpenVR.Init(ref utilityError, EVRApplicationType.VRApplication_Utility);
+            if (utilityError == EVRInitError.None && vrSystem != null)
+            {
+                status = "SteamVR connected. AppType: Utility fallback.";
+                return vrSystem;
+            }
+
+            status = $"SteamVR is not ready: Background={backgroundError}, Utility={utilityError}";
             return null;
         }
 
