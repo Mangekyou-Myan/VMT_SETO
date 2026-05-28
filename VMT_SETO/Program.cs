@@ -21,6 +21,14 @@ namespace VmtSeto
         Off
     }
 
+    enum TrackerSourceStatus
+    {
+        ConfigRequired,
+        Tracking,
+        NotFound,
+        NoPose
+    }
+
     class BodyPartConfig
     {
         public string Name = string.Empty;
@@ -66,7 +74,72 @@ namespace VmtSeto
 
         public override string ToString()
         {
-            return $"{Config.Name} / VMT {Config.VmtId}";
+            return TrackerStatus.FormatCompactListText(Config);
+        }
+    }
+
+    static class TrackerStatus
+    {
+        public static TrackerSourceStatus GetStatus(BodyPartConfig config)
+        {
+            if (!IsConfiguredSerial(config.SerialNumber))
+            {
+                return TrackerSourceStatus.ConfigRequired;
+            }
+
+            if (config.DeviceIndex == OpenVR.k_unTrackedDeviceIndexInvalid)
+            {
+                return TrackerSourceStatus.NotFound;
+            }
+
+            return config.HasLatestLivePose
+                ? TrackerSourceStatus.Tracking
+                : TrackerSourceStatus.NoPose;
+        }
+
+        public static bool IsConfiguredSerial(string value)
+        {
+            string serial = value.Trim();
+            if (serial.Length == 0)
+            {
+                return false;
+            }
+
+            string normalized = serial.ToLowerInvariant();
+            if (normalized is "serial" or "trackerserial" or "tracker" or "none" or "null")
+            {
+                return false;
+            }
+
+            if (normalized.Contains("xxxx", StringComparison.Ordinal)
+                || normalized.Contains("placeholder", StringComparison.Ordinal)
+                || normalized.Contains("example", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        public static string GetLabel(TrackerSourceStatus status)
+        {
+            return status switch
+            {
+                TrackerSourceStatus.Tracking => "Tracking",
+                TrackerSourceStatus.NotFound => "Not found",
+                TrackerSourceStatus.NoPose => "No pose",
+                TrackerSourceStatus.ConfigRequired => "Config required",
+                _ => "Unknown"
+            };
+        }
+
+        public static string FormatCompactListText(BodyPartConfig config)
+        {
+            string indexText = config.DeviceIndex == OpenVR.k_unTrackedDeviceIndexInvalid
+                ? "-"
+                : config.DeviceIndex.ToString(CultureInfo.InvariantCulture);
+
+            return $"{config.Name} | VMT {config.VmtId} | OpenVR {indexText}";
         }
     }
 
@@ -200,6 +273,7 @@ namespace VmtSeto
         const int OscRetryDelayMs = 3000;
         const string TypeTag = ",iiffffffff";
         const string ConfigFieldSeparator = "_+_";
+        const string ManualUrl = "https://docs.google.com/document/d/1EgEW8kCiLtBClyak2-tKwxFNZu0EyZutmvdmoZD_ci4/edit?tab=t.0";
 
         static readonly List<BodyPartConfig> Configs = new();
         static readonly System.Net.Sockets.UdpClient Sender = new();
@@ -347,22 +421,34 @@ namespace VmtSeto
 
         static void MainCore(string[] args)
         {
-            Console.WriteLine("=== VMT SETO start ===");
+            Console.WriteLine($"=== VMT SETO v{GetAppVersion()} start ===");
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
             string? configPath = ResolveConfigPath(args);
             if (configPath == null)
             {
+                ShowStartupFailureAndWait("Startup failed: config path could not be resolved.");
                 return;
             }
 
             if (!LoadConfig(configPath))
             {
+                ShowStartupFailureAndWait(
+                    "Startup failed: config file could not be loaded."
+                    + Environment.NewLine
+                    + Environment.NewLine
+                    + configPath
+                    + Environment.NewLine
+                    + Environment.NewLine
+                    + "Please extract the whole ZIP folder before running VMT SETO."
+                    + Environment.NewLine
+                    + "The exe must stay next to config.txt and the configs folder.");
                 return;
             }
             ApplyRuntimeHints();
             StartControlUi();
+            ShowTrackerConfigWarningIfNeeded();
 
             ConnectOsc("startup");
             SendCreateAllAtOrigin(force: true);
@@ -386,6 +472,35 @@ namespace VmtSeto
                 ShutdownControlUi();
                 Sender.Dispose();
                 OpenVR.Shutdown();
+            }
+        }
+
+        static string GetAppVersion()
+        {
+            return typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "unknown";
+        }
+
+        static void ShowStartupFailureAndWait(string message)
+        {
+            Console.WriteLine(message);
+            try
+            {
+                MessageBox.Show(
+                    message,
+                    "VMT SETO startup error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch
+            {
+                // Console output is enough when a message box cannot be shown.
+            }
+
+            if (!Console.IsInputRedirected)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Press Enter to exit.");
+                Console.ReadLine();
             }
         }
 
@@ -830,6 +945,7 @@ namespace VmtSeto
 
             var capturedNames = new List<string>();
             var skippedNames = new List<string>();
+            var skippedProblems = new List<string>();
 
             lock (PoseStateLock)
             {
@@ -849,6 +965,7 @@ namespace VmtSeto
                     if (!config.HasLatestLivePose)
                     {
                         skippedNames.Add(config.Name);
+                        skippedProblems.Add(FormatCaptureProblem(config));
                         continue;
                     }
 
@@ -859,12 +976,12 @@ namespace VmtSeto
 
             if (capturedNames.Count == 0)
             {
-                return $"Capture failed: tracker pose is not valid. ({FormatTrackerNames(skippedNames)})";
+                return $"Capture failed: {FormatTrackerProblems(skippedProblems)}";
             }
 
             if (skippedNames.Count > 0)
             {
-                return $"Captured: {capturedNames.Count}, skipped: {FormatTrackerNames(skippedNames)}";
+                return $"Captured: {capturedNames.Count}, skipped: {FormatTrackerProblems(skippedProblems)}";
             }
 
             return capturedNames.Count == 1
@@ -927,6 +1044,24 @@ namespace VmtSeto
             if (names.Count == 0) return string.Empty;
             if (names.Count <= 3) return string.Join(", ", names);
             return string.Join(", ", names.Take(3)) + $" +{names.Count - 3}";
+        }
+
+        static string FormatCaptureProblem(BodyPartConfig config)
+        {
+            return TrackerStatus.GetStatus(config) switch
+            {
+                TrackerSourceStatus.ConfigRequired => $"{config.Name}: config required",
+                TrackerSourceStatus.NotFound => $"{config.Name}: source not found",
+                TrackerSourceStatus.NoPose => $"{config.Name}: no pose",
+                _ => $"{config.Name}: not valid"
+            };
+        }
+
+        static string FormatTrackerProblems(IReadOnlyList<string> problems)
+        {
+            if (problems.Count == 0) return "tracker pose is not valid.";
+            if (problems.Count <= 3) return string.Join(", ", problems);
+            return string.Join(", ", problems.Take(3)) + $" +{problems.Count - 3}";
         }
 
         static string GetTriggerCaptureStatus()
@@ -1251,6 +1386,54 @@ namespace VmtSeto
         {
             Console.WriteLine($"Config warning: {configPath}:{lineNumber}: {message}");
             Console.WriteLine($"  {line}");
+        }
+
+        static void ShowTrackerConfigWarningIfNeeded()
+        {
+            string? warning = BuildTrackerConfigWarning();
+            if (warning == null)
+            {
+                return;
+            }
+
+            string message = warning
+                + Environment.NewLine
+                + Environment.NewLine
+                + "Read the manual and edit the config file before using Capture."
+                + Environment.NewLine
+                + ManualUrl;
+
+            Console.WriteLine("Config warning: tracker information is not configured.");
+            Console.WriteLine(message);
+
+            try
+            {
+                MessageBox.Show(
+                    message,
+                    "VMT SETO config warning",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+            catch
+            {
+                // Console output is enough when a message box cannot be shown.
+            }
+        }
+
+        static string? BuildTrackerConfigWarning()
+        {
+            if (Configs.Count == 0)
+            {
+                return "No tracker lines were loaded from the selected config file.";
+            }
+
+            int configuredCount = Configs.Count(config => TrackerStatus.IsConfiguredSerial(config.SerialNumber));
+            if (configuredCount == 0)
+            {
+                return "Tracker lines were loaded, but all tracker serial/name fields look unconfigured.";
+            }
+
+            return null;
         }
 
         static void ParseSetting(string key, string value, string configPath, int lineNumber, string line)
@@ -1754,6 +1937,7 @@ namespace VmtSeto
                 return false;
             }
 
+            ShowTrackerConfigWarningIfNeeded();
             RememberSelectedConfig(settings.SelectedConfigPath);
             ConnectOsc("config switch");
             SendCreateAllAtOrigin(force: true);
@@ -2558,7 +2742,7 @@ namespace VmtSeto
             foreach (var conf in Configs)
             {
                 string indexText = conf.DeviceIndex == OpenVR.k_unTrackedDeviceIndexInvalid ? "-" : conf.DeviceIndex.ToString(CultureInfo.InvariantCulture);
-                WriteStatsLine($"{conf.Name}: VMT {conf.VmtId} / OpenVR {indexText} / {(conf.LastEnableSent ? "Enabled " : "Disabled")}");
+                WriteStatsLine($"{conf.Name}: VMT {conf.VmtId} / OpenVR {indexText} / {TrackerStatus.GetLabel(TrackerStatus.GetStatus(conf))} / {(conf.LastEnableSent ? "Enabled " : "Disabled")}");
                 lineCount++;
             }
 
@@ -2641,6 +2825,14 @@ namespace VmtSeto
         }
     }
 
+    class FlickerFreeListView : ListView
+    {
+        public FlickerFreeListView()
+        {
+            DoubleBuffered = true;
+        }
+    }
+
     class CalibrationForm : Form
     {
         readonly Func<bool> getCalibrationActive;
@@ -2659,7 +2851,8 @@ namespace VmtSeto
         readonly Action requestExit;
         readonly ComboBox configComboBox;
         readonly ComboBox bodyConfigComboBox;
-        readonly CheckedListBox batchTrackerListBox;
+        readonly ListView batchTrackerListBox;
+        readonly ImageList trackerStatusImageList;
         readonly TextBox selectedPathTextBox;
         readonly TextBox currentPathTextBox;
         readonly NumericUpDown positionXInput;
@@ -2718,6 +2911,7 @@ namespace VmtSeto
             this.setPositionPredictionStrength = setPositionPredictionStrength;
             this.requestConfigReload = requestConfigReload;
             this.requestExit = requestExit;
+            trackerStatusImageList = CreateTrackerStatusImageList();
 
             Text = "VMT SETO Control";
             Width = 620;
@@ -2881,14 +3075,22 @@ namespace VmtSeto
             };
             selectNoTrackersButton.Click += (_, _) => SetAllBatchTrackersChecked(false);
 
-            batchTrackerListBox = new CheckedListBox
+            batchTrackerListBox = new FlickerFreeListView
             {
                 Left = 16,
                 Top = 252,
                 Width = 572,
                 Height = 78,
-                CheckOnClick = true
+                CheckBoxes = true,
+                FullRowSelect = true,
+                HeaderStyle = ColumnHeaderStyle.None,
+                HideSelection = false,
+                MultiSelect = false,
+                SmallImageList = trackerStatusImageList,
+                UseCompatibleStateImageBehavior = false,
+                View = View.Details
             };
+            batchTrackerListBox.Columns.Add(string.Empty, 548);
 
             saveStatusLabel = new Label
             {
@@ -3132,7 +3334,7 @@ namespace VmtSeto
             bodyConfigComboBox.Items.Clear();
             bodyConfigComboBox.Items.AddRange(configs.Select(config => new BodyConfigChoice(config)).Cast<object>().ToArray());
             batchTrackerListBox.Items.Clear();
-            batchTrackerListBox.Items.AddRange(configs.Select(config => new BodyConfigChoice(config)).Cast<object>().ToArray());
+            batchTrackerListBox.Items.AddRange(configs.Select(CreateBatchTrackerListItem).ToArray());
             lastBodyConfigPath = currentPath;
             lastBodyConfigCount = configs.Count;
 
@@ -3163,16 +3365,16 @@ namespace VmtSeto
             {
                 for (int i = 0; i < batchTrackerListBox.Items.Count; i++)
                 {
-                    if (batchTrackerListBox.Items[i] is BodyConfigChoice choice
+                    if (batchTrackerListBox.Items[i].Tag is BodyConfigChoice choice
                         && previousCheckedIds.Contains(choice.Config.VmtId))
                     {
-                        batchTrackerListBox.SetItemChecked(i, true);
+                        batchTrackerListBox.Items[i].Checked = true;
                     }
                 }
             }
             else if (selectedIndex >= 0 && selectedIndex < batchTrackerListBox.Items.Count)
             {
-                batchTrackerListBox.SetItemChecked(selectedIndex, true);
+                batchTrackerListBox.Items[selectedIndex].Checked = true;
             }
 
             SetBodyEditorEnabled(true);
@@ -3189,6 +3391,108 @@ namespace VmtSeto
             {
                 LoadBodyChoices();
             }
+        }
+
+        static ListViewItem CreateBatchTrackerListItem(BodyPartConfig config)
+        {
+            var choice = new BodyConfigChoice(config);
+            return new ListViewItem(choice.ToString())
+            {
+                ImageKey = GetTrackerStatusImageKey(TrackerStatus.GetStatus(config)),
+                Tag = choice
+            };
+        }
+
+        void RefreshBatchTrackerStatusImages()
+        {
+            bool updating = false;
+            foreach (ListViewItem item in batchTrackerListBox.Items)
+            {
+                if (item.Tag is not BodyConfigChoice choice)
+                {
+                    continue;
+                }
+
+                string text = choice.ToString();
+                if (!string.Equals(item.Text, text, StringComparison.Ordinal))
+                {
+                    if (!updating)
+                    {
+                        batchTrackerListBox.BeginUpdate();
+                        updating = true;
+                    }
+
+                    item.Text = text;
+                }
+
+                string imageKey = GetTrackerStatusImageKey(TrackerStatus.GetStatus(choice.Config));
+                if (!string.Equals(item.ImageKey, imageKey, StringComparison.Ordinal))
+                {
+                    if (!updating)
+                    {
+                        batchTrackerListBox.BeginUpdate();
+                        updating = true;
+                    }
+
+                    item.ImageKey = imageKey;
+                }
+            }
+
+            if (updating)
+            {
+                batchTrackerListBox.EndUpdate();
+            }
+        }
+
+        static ImageList CreateTrackerStatusImageList()
+        {
+            var imageList = new ImageList
+            {
+                ColorDepth = ColorDepth.Depth32Bit,
+                ImageSize = new System.Drawing.Size(14, 14)
+            };
+
+            imageList.Images.Add("tracking", CreateStatusBitmap(GetTrackerStatusColor(TrackerSourceStatus.Tracking)));
+            imageList.Images.Add("not-found", CreateStatusBitmap(GetTrackerStatusColor(TrackerSourceStatus.NotFound)));
+            imageList.Images.Add("no-pose", CreateStatusBitmap(GetTrackerStatusColor(TrackerSourceStatus.NoPose)));
+            imageList.Images.Add("config-required", CreateStatusBitmap(GetTrackerStatusColor(TrackerSourceStatus.ConfigRequired)));
+            return imageList;
+        }
+
+        static System.Drawing.Bitmap CreateStatusBitmap(System.Drawing.Color color)
+        {
+            var bitmap = new System.Drawing.Bitmap(14, 14);
+            using var graphics = System.Drawing.Graphics.FromImage(bitmap);
+            graphics.Clear(System.Drawing.Color.Transparent);
+            using var brush = new System.Drawing.SolidBrush(color);
+            using var borderPen = new System.Drawing.Pen(System.Drawing.Color.FromArgb(80, 0, 0, 0));
+            graphics.FillRectangle(brush, 2, 2, 10, 10);
+            graphics.DrawRectangle(borderPen, 2, 2, 10, 10);
+            return bitmap;
+        }
+
+        static string GetTrackerStatusImageKey(TrackerSourceStatus status)
+        {
+            return status switch
+            {
+                TrackerSourceStatus.Tracking => "tracking",
+                TrackerSourceStatus.NotFound => "not-found",
+                TrackerSourceStatus.NoPose => "no-pose",
+                TrackerSourceStatus.ConfigRequired => "config-required",
+                _ => "config-required"
+            };
+        }
+
+        static System.Drawing.Color GetTrackerStatusColor(TrackerSourceStatus status)
+        {
+            return status switch
+            {
+                TrackerSourceStatus.Tracking => System.Drawing.Color.FromArgb(0, 190, 90),
+                TrackerSourceStatus.NotFound => System.Drawing.Color.FromArgb(235, 45, 45),
+                TrackerSourceStatus.NoPose => System.Drawing.Color.FromArgb(245, 175, 30),
+                TrackerSourceStatus.ConfigRequired => System.Drawing.Color.FromArgb(255, 120, 25),
+                _ => System.Drawing.SystemColors.ControlText
+            };
         }
 
         void RefreshBodyEditorValues()
@@ -3302,6 +3606,8 @@ namespace VmtSeto
         List<BodyPartConfig> GetCheckedBodyConfigs()
         {
             return batchTrackerListBox.CheckedItems
+                .Cast<ListViewItem>()
+                .Select(item => item.Tag)
                 .OfType<BodyConfigChoice>()
                 .Select(choice => choice.Config)
                 .ToList();
@@ -3310,6 +3616,8 @@ namespace VmtSeto
         HashSet<int> GetCheckedBatchVmtIds()
         {
             return batchTrackerListBox.CheckedItems
+                .Cast<ListViewItem>()
+                .Select(item => item.Tag)
                 .OfType<BodyConfigChoice>()
                 .Select(choice => choice.Config.VmtId)
                 .ToHashSet();
@@ -3319,7 +3627,7 @@ namespace VmtSeto
         {
             for (int i = 0; i < batchTrackerListBox.Items.Count; i++)
             {
-                batchTrackerListBox.SetItemChecked(i, isChecked);
+                batchTrackerListBox.Items[i].Checked = isChecked;
             }
         }
 
@@ -3340,6 +3648,7 @@ namespace VmtSeto
         void RefreshState()
         {
             RefreshBodyChoicesIfNeeded();
+            RefreshBatchTrackerStatusImages();
 
             string triggerStatus = getTriggerCaptureStatus();
             if (triggerStatus.Length > 0 && triggerStatus != lastTriggerStatus)
@@ -3359,14 +3668,81 @@ namespace VmtSeto
                 positionPredictionTrackBar.Value = predictionPercent;
             }
 
-            positionPredictionValueLabel.Text = $"{predictionPercent}% ({getEffectivePositionPredictionMs():F1} ms)";
+            SetTextIfChanged(positionPredictionValueLabel, $"{predictionPercent}% ({getEffectivePositionPredictionMs():F1} ms)");
             refreshingControls = false;
 
             bool active = getCalibrationActive();
-            currentPathTextBox.Text = getCurrentConfigPath();
-            statusLabel.Text = active ? "Calibration locked" : "Live tracking";
-            toggleButton.Text = active ? "Unlock Calibration" : "Lock Calibration";
-            toggleButton.BackColor = active ? System.Drawing.Color.FromArgb(245, 210, 95) : System.Drawing.Color.FromArgb(125, 215, 150);
+            SetTextIfChanged(currentPathTextBox, getCurrentConfigPath());
+            string trackerSummary = BuildTrackerStatusSummary();
+            SetTextIfChanged(
+                statusLabel,
+                (active ? "Calibration locked" : "Live tracking")
+                + (trackerSummary.Length > 0 ? $" | {trackerSummary}" : string.Empty));
+            SetForeColorIfChanged(statusLabel, GetSummaryStatusColor());
+            SetTextIfChanged(toggleButton, active ? "Unlock Calibration" : "Lock Calibration");
+            SetBackColorIfChanged(toggleButton, active ? System.Drawing.Color.FromArgb(245, 210, 95) : System.Drawing.Color.FromArgb(125, 215, 150));
+        }
+
+        static void SetTextIfChanged(Control control, string text)
+        {
+            if (!string.Equals(control.Text, text, StringComparison.Ordinal))
+            {
+                control.Text = text;
+            }
+        }
+
+        static void SetForeColorIfChanged(Control control, System.Drawing.Color color)
+        {
+            if (control.ForeColor != color)
+            {
+                control.ForeColor = color;
+            }
+        }
+
+        static void SetBackColorIfChanged(Control control, System.Drawing.Color color)
+        {
+            if (control.BackColor != color)
+            {
+                control.BackColor = color;
+            }
+        }
+
+        string BuildTrackerStatusSummary()
+        {
+            var configs = getBodyConfigs();
+            if (configs.Count == 0)
+            {
+                return "no trackers";
+            }
+
+            int configRequired = configs.Count(config => TrackerStatus.GetStatus(config) == TrackerSourceStatus.ConfigRequired);
+            int notFound = configs.Count(config => TrackerStatus.GetStatus(config) == TrackerSourceStatus.NotFound);
+            int noPose = configs.Count(config => TrackerStatus.GetStatus(config) == TrackerSourceStatus.NoPose);
+            if (configRequired > 0) return $"{configRequired} config required";
+            if (notFound > 0) return $"{notFound} not found";
+            if (noPose > 0) return $"{noPose} no pose";
+            return "all tracking";
+        }
+
+        System.Drawing.Color GetSummaryStatusColor()
+        {
+            var configs = getBodyConfigs();
+            if (configs.Any(config => TrackerStatus.GetStatus(config) == TrackerSourceStatus.ConfigRequired))
+            {
+                return GetTrackerStatusColor(TrackerSourceStatus.ConfigRequired);
+            }
+
+            if (configs.Any(config => TrackerStatus.GetStatus(config) == TrackerSourceStatus.NotFound))
+            {
+                return GetTrackerStatusColor(TrackerSourceStatus.NotFound);
+            }
+
+            if (configs.Any(config => TrackerStatus.GetStatus(config) == TrackerSourceStatus.NoPose))
+            {
+                return GetTrackerStatusColor(TrackerSourceStatus.NoPose);
+            }
+
+            return GetTrackerStatusColor(TrackerSourceStatus.Tracking);
         }
     }
 

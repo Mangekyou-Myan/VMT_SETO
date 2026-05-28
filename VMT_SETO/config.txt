@@ -4,4 +4,4 @@
 # startupConfigMode=fixed always starts with config.
 startupConfigMode=remember
 config=configs/default.txt
-lastConfig=configs/default.txt
+lastConfig=configs/default2.txt
